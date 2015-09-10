@@ -2,14 +2,14 @@
   "name": "meditate",
   "version": "0.0.0",
   "description": "Coming Soon",
-  "main": "index.js",
+  "main": "meditate.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Sam Newman",
   "license": "MIT",
   "devDependencies": {
-    "macchiato": "^4.2.1"
+    "macchiato": "^4.3.0"
   },
   "dependencies": {
     "bluebird": "^2.9.34"
