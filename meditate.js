@@ -1,6 +1,4 @@
-module.exports = Observable;
-
-var Promise = require('bluebird');
+module.exports = Meditate;
 
 function PromiseWrap() {}
 PromiseWrap.prototype.resolve = null;
@@ -21,7 +19,6 @@ PromiseWrap.prototype.getPromise = function () {
 
 PromiseWrap.prototype.update = function (value) {
   if (isPromise(value)) {
-
     if (this.promise) UpdatePromise(this, value);
     else this.promise = value;
     return value;
@@ -51,20 +48,15 @@ Chunk.prototype = Object.create(PromiseWrap.prototype, {
 });
 Chunk.prototype.next = null;
 
-function CallStateHandle(state, cb, data) {
-  function push(d) { state.push(d); }
-  function end(d) { state.end(d); }
-  return cb.call(state.owner, data, push, end);
-}
-
 function State(owner, opts) {
   this.owner = owner;
   this.options = opts;
+  this.buffer = [];
   this.pipes = [];
   this.it = it(this);
   this.it.next();
   this.endPromise = new PromiseWrap();
-  SetNewWrapPromise(this.endPromise);
+  //SetNewWrapPromise(this.endPromise);
 }
 
 State.prototype.owner = null;
@@ -73,30 +65,79 @@ State.prototype.nextPush = null;
 State.prototype.nextPull = null;
 State.prototype.ended = false;
 State.prototype.ending = false;
+State.prototype.syncEnding = false;
+
 State.prototype.error = null;
 State.prototype.pipes = null;
 State.prototype.buffer = null;
 State.prototype.endPromise = null;
 
+State.prototype.isCorked = false;
+State.prototype.corked = 0;
+State.prototype.pending = 0;
+State.prototype.pendingPipeDrain = false;
+State.prototype.deferEnd = 0;
+
 State.prototype.ondata = function (value) {
-  if (this.buffer) {
-    this.buffer.push(value);
+  for (var i = 0; i < this.pipes.length; i += 1)
+    this.pipes[i].write(value);
+};
+
+function CallHandle(ctx, cb, data, push, end) {
+  try {
+    return cb.call(ctx, data, push, end);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
+function CallStateHandle(state, cb, data) {
+  function push(d) { state.push(d); }
+  function end(d) {
+    if (d !== undefined) state.push(d);
+    state.end();
+  }
+  return CallHandle(state.owner, cb, data, push, end);
+}
+
+function PushWriteChunk(state, data) {
+  var cb = state.options.cb;
+  if ('function' !== typeof cb) return state.push(data);
+  return state.push(CallStateHandle(state, cb, data));
+}
+
+State.prototype.write = function (data) {
+  if (this.isCorked) {
+    this.buffer.push(data);
+    this.corked += 1;
   } else {
-    for (var i = 0; i < this.pipes.length; i += 1)
-      this.pipes[i].write(value);
+    return PushWriteChunk(this, data);
   }
 };
 
-State.prototype.write = function (data) {
-  var cb = this.options.cb;
-  if ('function' !== typeof cb) return this.push(data);
+function FlushBufferToPipes(state, pipes) {
+  state.pendingPipeDrain = true;
+  state.deferEnd += 1;
 
-  //this.scheduler.push(data);
-  return this.push(CallStateHandle(this, cb, data));
-};
+  process.nextTick(function () {
+    while (state.pending > 0) {
+      var chunk = state.pop();
+
+      for (var i = 0; i < pipes.length; i++)
+        pipes[i].write(chunk);
+    }
+
+    state.pendingPipeDrain = false;
+  });
+}
 
 State.prototype.addPipe = function (dest) {
-  if (this.pipes.indexOf(dest) < 0) this.pipes.push(dest);
+  if (this.pipes.indexOf(dest) < 0) {
+    this.pipes.push(dest);
+
+    if (!this.pendingPipeDrain)
+      FlushBufferToPipes(this, this.pipes);
+  }
   return dest;
 };
 
@@ -114,30 +155,35 @@ State.prototype.removePipe = function (pipe) {
  */
 State.prototype.push = function (value) {
   if (value === undefined) return;
-  if (this.ended) throw new Error('data after end');
-  return PushValue(this, value);
-};
 
-function PushValue(state, value) {
-  if (state.nextPush !== null) {
-    var chunk = state.nextPush;
-    state.nextPush = state.nextPush.next;
-  } else {
+  var chunk;
+  if (this.pipes.length === 0) {
+    chunk = this.nextPush;
 
-    var chunk = new Chunk();
+    if (this.nextPush !== null) {
+      this.nextPush = chunk.next;
 
-    if (state.nextPull === null) {
-      state.nextPull = state.tail = chunk;
     } else {
-      state.tail.next = chunk;
-      state.tail = chunk;
-  }
+      chunk = new Chunk();
+
+      if (this.nextPull === null) {
+        this.nextPull = this.tail = chunk;
+      } else {
+        this.tail.next = chunk;
+        this.tail = chunk;
+      }
+    }
+
+    // increase pending count
+    this.pending += 1;
+  } else {
+    chunk = new Chunk();
   }
 
   chunk.update(value);
-  state.ondata(chunk.promise);
-  return StateIsExpectingData(state);
-}
+  this.ondata(chunk.promise);
+  return StateIsExpectingData(this);
+};
 
 /**
  * Is State expected some data
@@ -168,6 +214,9 @@ State.prototype.pop = function () {
     }
   }
 
+  // decrease pending count
+  this.pending -= 1;
+
   return WrapChunkPromise(chunk.getPromise(), this);
 };
 
@@ -180,74 +229,62 @@ function WrapChunkPromise(promise, state) {
   }
 }
 
-function CorkBuffer() {
- PromiseWrap.call(this);
- this.stack = [];
-}
-
-CorkBuffer.prototype = Object.create(PromiseWrap.prototype, {
-  constructor: { value: CorkBuffer }
-});
-
-CorkBuffer.prototype.release = function () {
-  return this.update(Promise.all(this.stack));
-};
-
-CorkBuffer.prototype.push = function (d) {
-  this.stack.push(d);
-};
-
 State.prototype.cork = function () {
-  if (!this.buffer) this.buffer = new CorkBuffer();
-  return this.buffer.getPromise();
+  if (!this.isCorked) this.isCorked = true;
 };
-
-function DistributeChunk(chunk, pipe) {
-  process.nextTick(function () {
-    pipe.write(chunk);
-  });
-}
 
 /**
  * Drain state buffer, this assumes explicitly
  * that the state has a buffer
  * @param {State} state
  */
-function DrainBuffer(state, buffer, pipes) {
-  for (var i = 0; i < buffer.stack.length; i += 1) {
-    for (var j = 0; j < pipes.length; j += 1)
-      DistributeChunk(buffer.stack[i], pipes[j]);
+function DrainBuffer(state, buffer) {
+  for (var i = 0; i < buffer.length; i += 1) {
+    state.corked -= 1;
+    PushWriteChunk(state, buffer[i]);
   }
+
+  buffer.length = 0;
 }
 
 State.prototype.uncork = function () {
-  var cork = this.buffer;
-  if (cork) {
-    DrainBuffer(this, this.buffer, this.pipes);
-    this.buffer = null;
-    return cork.release();
-  }
+  this.isCorked = false;
 
-  return Promise.resolve([]);
+  if (this.buffer.length > 0)
+    DrainBuffer(this, this.buffer);
 };
 
 State.prototype.sync = function (data) {
-  WriteAndEndSync(this, data);
+  if (this.ended) throw new Error('data after end');
+
+  if (this.ending === false && this.syncEnding === false) {
+    this.syncEnding = true;
+    TriggerEndState(this);
+  }
+
+  return this.write(data);
 };
 
 State.prototype.end = function (data) {
-  WriteAndEndSync(this, data)
+  if (this.ended) {
+    if (data !== undefined)
+      throw new Error('data after end');
+    else
+      return;
+  }
+
+  if (this.ending === false && this.syncEnding === false)
+    TriggerEndState(this);
+
+  this.ending = true;
+
+  if (data !== undefined) this.write(data);
   return this.endPromise.getPromise();
 };
 
-function WriteAndEndSync(state, data) {
-  if (state.ending === false) {
-    state.ending = true;
-    EndState(state);
-  }
-
-  state.write(data);
-}
+State.prototype.done = function () {
+  return this.endPromise.getPromise();
+};
 
 /**
  * End the given State
@@ -256,10 +293,24 @@ function WriteAndEndSync(state, data) {
  * @param {*} value
  * @return {Promise}
  */
-function EndState(state) {
+function TriggerEndState(state) {
   process.nextTick(function () {
-    state.close();
+    EndState(state);
   });
+}
+
+function EndState(state) {
+  // uncork to flush all corked data through
+  state.uncork();
+
+  if (state.deferEnd > 0) {
+    state.deferEnd -= 1;
+    TriggerEndState(state);
+  } else {
+    // set state ending if not already
+    state.ending = true;
+    state.close();
+  }
 }
 
 /**
@@ -272,12 +323,21 @@ State.prototype.close = function () {
 
   // call make cork actually flush to transform
   // rather than end
-  var uncorked = this.options.end(this.uncork());
+  var endData = this.options.end(Promise.all(this.flush()));
 
   for (var i = 0; i < this.pipes.length; i += 1)
-    this.pipes[i].end()
+    this.pipes[i].end();
 
-  this.endPromise.update(uncorked);
+  this.endPromise.update(endData);
+};
+
+State.prototype.flush = function () {
+  var d = [];
+
+  while ((this.pending + this.corked) > 0)
+    d.push(this.pop());
+
+  return d;
 };
 
 function isPromise(p) {
@@ -303,92 +363,112 @@ HandleArgs.prototype.options = null;
 HandleArgs.prototype.cb = DefaultCallback;
 HandleArgs.prototype.end = DefaultCallback;
 
-function Observable(op, cb, onend) {
-  if (!(this instanceof Observable))
-    return new Observable(op, cb, onend);
+function Meditate(op, cb, onend) {
+  if (!(this instanceof Meditate))
+    return new Meditate(op, cb, onend);
 
   this.__state__ = new State(this, new HandleArgs(arguments));
 }
 
-Observable.prototype.next = function (d) {
+Meditate.prototype.next = function (d) {
   return this.__state__.it.next(d);
 };
 
-Observable.prototype.sync = function (data) {
+Meditate.prototype.sync = function (data) {
   return this.__state__.sync(data);
 };
 
-Observable.prototype.end
-= Observable.prototype.done
-= function (value) {
+Meditate.prototype.end = function (value) {
   return this.__state__.end(value);
 };
 
-Observable.prototype.push = function (value) {
+Meditate.prototype.done = function () {
+  return this.__state__.done();
+};
+
+Meditate.prototype.push = function (value) {
   return this.__state__.push(value);
 };
 
-Observable.prototype.pipe = function (dest) {
+function ArrayOfPipes(state, pipes) {
+  for (var i = 0; i < pipes.length; i += 1)
+    state.addPipe(pipes[i]);
+
+  return pipes;
+}
+
+Meditate.prototype.pipe = function (dest) {
+  if (Array.isArray(dest))
+    return ArrayOfPipes(this.__state__, dest);
+
   return this.__state__.addPipe(dest);
 };
 
-Observable.prototype.unpipe = function (dest) {
+Meditate.prototype.unpipe = function (dest) {
   return this.__state__.removePipe(dest);
 };
 
-Observable.prototype.write = function (data) {
+Meditate.prototype.write = function (data) {
   return this.__state__.write(data);
 };
 
-function ReadState(state) {
-  return state.buffer ? null : state.pop();
+Meditate.prototype.read = function () {
+  return this.__state__.pop();
+};
+
+Meditate.prototype.cork = function () {
+  this.__state__.cork();
+  return this;
+};
+
+Meditate.prototype.uncork = function () {
+  this.__state__.uncork();
+  return this;
+};
+
+function MaybeReadState(state) {
+  return state.isCorked ? null : state.pop();
 }
 
-Observable.prototype.read = function () {
-  return ReadState(this.__state__);
-};
-
-Observable.prototype.cork = function () {
-  return this.__state__.cork();
-};
-
-Observable.prototype.uncork = function () {
-  return this.__state__.uncork();
-};
+function EndIterator(output, state, started) {
+  return !output
+    && ((state.buffer.length === 0
+        && started)
+        || state.ending);
+}
 
 function * it(state) {
-  const pending = [];
   var started = false;
   var output = null;
   var p;
 
   while (true) {
-    if (!output && state.buffer === null && started)
+    if (EndIterator(output, state, started))
       return;
 
     started = true;
     var input = yield output;
 
     if (!state.ending) {
-      state.write(input);
+      state.sync(input);
 
       if (state.error) {
         yield Promise.reject(state.error);
         return;
       }
 
-      output = ReadState(state);
+      output = MaybeReadState(state);
     } else {
       output = null;
     }
   }
 }
 
-Object.defineProperty(Observable.prototype, 'ended', {
+Object.defineProperty(Meditate.prototype, 'ended', {
   get: function () { this.__state__.ended; }
 });
 
-Object.defineProperty(Observable.prototype, Symbol.iterator, {
+Object.defineProperty(Meditate.prototype, Symbol.iterator, {
   get: function () {
     var self = this;
 

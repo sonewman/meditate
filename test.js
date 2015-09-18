@@ -1,24 +1,20 @@
 const desc = require('macchiato');
 const Promise = require('bluebird');
-const Observable = require('./');
+const Meditate = require('./');
 
-desc('meditate.Observable')
+desc('meditate.Meditate')
 .should('push data through when pulled - this is only safe with sync or deterministic data', function (t) {
   const a = ['a', 'b', 'c', 'd'];
-  var i = 0;
+  var i = -1;
 
   var called = false;
-  const observable = Observable(function (data, push, end) {
+  const obs = Meditate(function (data, push, end) {
     called = true;
-    var value = a[i];
-    if ((i += 1) === a.length) end();
-    return value;
+    ++i < (a.length - 1) ? push(a[i]) : end(a[i]);
   });
 
   const b = [];
-  for (var v of observable) {
-    b.push(v);
-  }
+  for (var v of obs) b.push(v);
 
   return Promise.all(b).then(function (res) {
     t.eqls(res, a);
@@ -30,7 +26,7 @@ desc('meditate.Observable')
   var i = 0;
 
   var called = false;
-  const observable = Observable(function () {
+  const obs = Meditate(function () {
     return new Promise(function (resolve, reject) {
       process.nextTick(function () {
         called = true;
@@ -43,7 +39,7 @@ desc('meditate.Observable')
   const b = [];
 
   for (var j = 0; j < a.length; j++) {
-    b.push(observable.next().value);
+    b.push(obs.next().value);
   }
 
   return Promise.all(b).then(function (res) {
@@ -51,16 +47,21 @@ desc('meditate.Observable')
     t.assert(called);
   });
 })
-.should('passthrough data asynchronously if no callback is set and data is manually passed through', function (t) {
+.should('push data manually skipping iterator', function (t) {
   const a = ['a', 'b', 'c', 'd'];
   const b = [];
-  const observable = Observable();
+
+  var wasNotCalled = true;
+  const obs = Meditate(function (d) {
+    wasNotCalled = false;
+    return d;
+  });
 
   for (var i = 0; i < a.length; i++) {
-    b.push(observable.next(a[i]).value);
+    b.push(obs.next(a[i]).value);
   }
 
-  observable.end();
+  obs.end();
 
   return Promise.all(b).then(function (res) {
     t.eqls(res, a);
@@ -69,40 +70,91 @@ desc('meditate.Observable')
 .should('call end callback passing on returned value', function (t) {
   const a = ['a', 'b', 'c', 'd'];
 
-  const src = Observable();
-  src.cork();
+  const src = Meditate();
+  const dest = src.pipe(Meditate());
 
-  const dest = Observable();
-
-  src.pipe(dest);
   for (var i = 0; i < a.length; i++) src.sync(a[i]);
 
   const d = [];
-
   for (i = 0; i < a.length; i++) d.push(dest.read());
 
   return Promise.all(d).then(function (res) {
     t.eqls(res, a);
   });
 })
-.should('multiplex output when piped to other observables', function (t) {
+.should('allow end to be called multiple times resolving the same promise', function (t) {
+  const a = ['a', 'b', 'c', 'd'];
+
+  const src = Meditate();
+
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+  
+  var end1 = src.end();
+  var end2 = src.end()
+  
+  t.equals(end1, end2);
+
+  return end1.then(function (res1) {
+    return end2.then(function (res2) {
+      t.eqls(res1, res2);
+    });
+  });
+})
+.should('multiplex output when piped to other streams/observables', function (t) {
   const a = ['a', 'b', 'c', 'd'];
   const b = [];
   const c = [];
 
-  const src = Observable();
-  const dest1 = Observable();
-  const dest2 = Observable();
+  const src = Meditate();
+  const dest1 = Meditate();
+  const dest2 = Meditate();
 
   src.pipe(dest1);
   src.pipe(dest2);
 
+  for (var i = 0; i < a.length; i++) src.next(a[i]);
+  for (i = 0; i < a.length; i++) {
+    b.push(dest1.next().value);
+    c.push(dest2.next().value);
+  }
+
+  return Promise.all([
+    Promise.all(b).then(function (res) { t.eqls(res, a); }),
+    Promise.all(c).then(function (res) { t.eqls(res, a); })
+  ]);
+})
+.should('allow pipe to take an array of streams to pipe to', function (t) {
+  const a = ['a', 'b', 'c', 'd'];
+
+  const src = Meditate();
+  const dest1 = Meditate();
+  const dest2 = Meditate();
+
+  src.pipe([dest1, dest2]);
+
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+
+  return Promise.all([
+    dest1.end().then(function (res) { t.eqls(res, a); }),
+    dest2.end().then(function (res) { t.eqls(res, a); })
+  ]);
+})
+.should('flush to pipes when added after the data is added', function (t) {
+  const a = ['a', 'b', 'c', 'd'];
+  const b = [];
+  const c = [];
+
+  const src = Meditate();
+
   var i;
-  for (i = 0; i < a.length; i++) src.next(a[i]);
+  for (i = 0; i < a.length; i++) src.sync(a[i]);
+
+  const dest1 = src.pipe(Meditate());
+  const dest2 = src.pipe(Meditate());
+
   for (i = 0; i < a.length; i++) b.push(dest1.next().value);
   for (i = 0; i < a.length; i++) c.push(dest2.next().value);
 
-  src.end();
 
   return Promise.all([
     Promise.all(b).then(function (res) { t.eqls(res, a); }),
@@ -111,79 +163,79 @@ desc('meditate.Observable')
 })
 .should('allow corking capabilities', function (t) {
   const a = ['a', 'b', 'c', 'd'];
+  const src = Meditate().cork();
 
-  const src = Observable();
-  const b = src.cork();
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
 
-  for (var i = 0; i < a.length; i++) src.next(a[i]);
-  src.end();
-
-  return b.then(function (res) { t.eqls(res, a); });
+  return src.end().then(function (res) { t.eqls(res, a); });
 })
-.should('uncork returning the corked promise', function (t) {
+.should('uncork should release corked', function (t) {
   const a = ['a', 'b', 'c', 'd'];
 
-  const src = Observable();
-  src.cork();
+  var transformCalled = false;
+  const src = Meditate(function (data) {
+    transformCalled = true;
+    return data;
+  }).cork();
 
-  for (var i = 0; i < a.length; i++) src.next(a[i]);
-  const b = src.uncork();
-  src.end();
+  const b = [];
 
-  return b.then(function (res) { t.eqls(res, a); });
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+
+  t.isFalse(transformCalled);
+  src.uncork();
+  
+  for (i = 0; i < a.length; i++) b.push(src.read());
+
+  return Promise.all(b).then(function (res) {
+    t.assert(transformCalled);
+    t.eqls(res, a);
+  });
 })
-.should('return corked promise when end is called', function (t) {
+.should('return corked data fom call to end', function (t) {
   const a = ['a', 'b', 'c', 'd'];
 
-  const src = Observable();
-  src.cork();
+  const src = Meditate().cork();
 
   for (var i = 0; i < a.length; i++) src.next(a[i]);
 
   return src.end().then(function (res) { t.eqls(res, a); });
 })
-.should('return empty array from end if not corked', function (t) {
+.should('return empty array from end if no data', function (t) {
   const a = ['a', 'b', 'c', 'd'];
+  const b = [];
 
-  const src = Observable();
-  for (var i = 0; i < a.length; i++) src.next(a[i]);
+  const src = Meditate();
+  for (var i = 0; i < a.length; i++) 
+    b.push(src.next(a[i]).value);
 
-  return src.end().then(function (res) { t.eqls(res, []); });
+  return src.end().then(function (res) {
+    t.eqls(res, []);
+
+    return Promise.all(b).then(function (chunks) {
+      t.eqls(chunks, a);
+    });
+  });
 })
-.should('not return values until uncorked', function (t) {
+.should('not return buffered values if not consumed', function (t) {
   const a = ['a', 'b', 'c', 'd'];
+  const src = Meditate();
 
-  const src = Observable();
-  src.cork();
-
-  const out = [];
-  for (var i = 0; i < a.length; i++)
-    t.eqls(src.next(a[i]), { value: null, done: false });
-
-  src.uncork();
-
-  for (i = 0; i < a.length; i++)
-    out.push(src.next().value);
-
-  src.end();
-
-  return Promise.all(out)
-    .then(function (res) { t.eqls(res, a); });
+  for (var i = 0; i < a.length; i++) src.sync(a[i]);
+  return src.end().then(function (res) { t.eqls(res, a); });
 })
 .should('pass on all corked values to piped dest on uncork', function (t) {
   const a = ['a', 'b', 'c', 'd'];
 
-  const src = Observable();
-  src.cork();
+  const src = Meditate().cork();
+  const dest = src.pipe(Meditate());
 
-  const dest = Observable();
-
-  src.pipe(dest);
-  for (var i = 0; i < a.length; i++) src.sync(a[i]);
-
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+ 
   const d = [];
-
   for (i = 0; i < a.length; i++) d.push(dest.read());
+
+  src.end();
 
   return Promise.all(d).then(function (res) {
     t.eqls(res, a);
@@ -192,24 +244,92 @@ desc('meditate.Observable')
 .should('return flushed data from end if not read', function (t) {
   const a = ['a', 'b', 'c', 'd'];
 
-  const src = Observable();
+  const src = Meditate();
 
   for (var i = 0; i < a.length; i++) src.write(a[i]);
 
   return src.end().then(function (v) { t.eqls(v, a); });
 })
-//.should('return flushed data from end if not read', function (t) {
-//  const a = ['a', 'b', 'c', 'd'];
-//
-//  const src = Observable(null, function (end) {
-//    return end.then(function (v) {
-//      console.log(v);
-//      return true;
-//    });
-//  });
-//  src.cork();
-//
-//  for (var i = 0; i < a.length; i++) src.next(a[i]);
-//
-//  return src.end().then(function (value) { t.assert(value); });
-//})
+.should('return promise from end handle on end', function (t) {
+  const a = [1, 2, 3, 4, 5];
+
+  const src = Meditate(null, function (end) {
+    return end.then(function (v) {
+      for (var j = 0; j < v.length; j++)
+        v[j] = v[j] * 2;
+
+        return v;
+    });
+  });
+
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+
+  return src.end()
+    .then(function (values) { t.eqls(values, [2, 4, 6, 8, 10]); });
+})
+.should('handle error returned from iterator', function (t) {
+  const err = new Error();
+
+  const src = Meditate(function () {
+    return Promise.reject(err);
+  });
+
+  return src.next('abc').value.then(
+    function () {
+      t.fail();
+    },
+    function (er) {
+      t.eqls(er, err);
+      src.end();
+    }
+  );
+})
+.should('handle error thrown in iterator', function (t) {
+  const err = new Error();
+
+  const src = Meditate(function () {
+    throw err;
+  });
+
+  return src.next('abc').value.then(
+    function () {
+      t.fail();
+    },
+    function (er) {
+      t.eqls(er, err);
+      return src.end();
+    }
+  );
+})
+.should('errors should be passed up the pipeline', function (t) {
+  const err = new Error();
+  const src = Meditate(function () {
+    throw err;
+  });
+  
+  const dest = Meditate();
+  src.write('abc');
+  src.pipe(dest);
+
+  return dest.read().then(
+    function () {
+      t.fail();
+    },
+    function (er) {
+      t.eqls(er, err);
+      return src.end();
+    }
+  );
+})
+.should('allow access to the ending promise before end', function (t) {
+  const src = Meditate();
+  
+  src.write('abc');
+
+  var done = src.done();
+  src.end();
+
+  return done.then(function (res) {
+    t.eqls(res, ['abc']);
+  });
+})
