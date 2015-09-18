@@ -4,14 +4,22 @@
   "description": "Coming Soon",
   "main": "meditate.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "macchiato test"
   },
   "author": "Sam Newman",
   "license": "MIT",
   "devDependencies": {
     "macchiato": "^4.3.0"
   },
-  "dependencies": {
-    "bluebird": "^2.9.34"
-  }
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:sonewman/meditate.git"
+  },
+  "keywords": [],
+  "author": "Sam Newman",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/sonewman/meditate/issues"
+  },
+  "homepage": "https://github.com/sonewman/meditate"
 }
