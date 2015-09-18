@@ -1,6 +1,6 @@
 {
   "name": "meditate",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Coming Soon",
   "main": "meditate.js",
   "scripts": {
@@ -16,8 +16,6 @@
     "url": "git@github.com:sonewman/meditate.git"
   },
   "keywords": [],
-  "author": "Sam Newman",
-  "license": "MIT",
   "bugs": {
     "url": "https://github.com/sonewman/meditate/issues"
   },
