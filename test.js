@@ -27,7 +27,7 @@ desc('meditate.Meditate')
 
   var called = false;
   const obs = Meditate(function () {
-    return new Promise(function (resolve, reject) {
+    return new Promise(function (resolve) {
       process.nextTick(function () {
         called = true;
         resolve(a[i]);
@@ -47,13 +47,11 @@ desc('meditate.Meditate')
     t.assert(called);
   });
 })
-.should('push data manually skipping iterator', function (t) {
+.should('push data manually returning returned value', function (t) {
   const a = ['a', 'b', 'c', 'd'];
   const b = [];
 
-  var wasNotCalled = true;
   const obs = Meditate(function (d) {
-    wasNotCalled = false;
     return d;
   });
 
@@ -90,7 +88,7 @@ desc('meditate.Meditate')
   for (var i = 0; i < a.length; i++) src.write(a[i]);
   
   var end1 = src.end();
-  var end2 = src.end()
+  var end2 = src.end();
   
   t.equals(end1, end2);
 
@@ -121,6 +119,43 @@ desc('meditate.Meditate')
   return Promise.all([
     Promise.all(b).then(function (res) { t.eqls(res, a); }),
     Promise.all(c).then(function (res) { t.eqls(res, a); })
+  ]);
+})
+.should('allow multiplex to multiple streams which are not immediately read', function (t) {
+  const a = ['a', 'b', 'c', 'd'];
+  const b = ['a', 'b', 'c', 'd'];
+
+  const src = Meditate();
+  const dest1 = Meditate();
+  const dest2 = Meditate();
+
+  src.pipe(dest1);
+  src.pipe(dest2);
+
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+
+  return Promise.all([
+    dest1.end().then(function (res) { t.eqls(res, b); }),
+    dest2.end().then(function (res) { t.eqls(res, b); })
+  ]);
+})
+.should('allow multiplex to multiple streams which are not immediately read', function (t) {
+  const a = ['a', 'b', 'c', 'd'];
+  const b = ['a', 'b', 'c', 'd'];
+//  const a = ['a', 'b'];
+
+  const src = Meditate();
+  const dest1 = Meditate();
+  const dest2 = Meditate();
+
+  src.pipe(dest1);
+  src.pipe(dest2);
+
+  for (var i = 0; i < a.length; i++) src.write(a[i]);
+
+  return Promise.all([
+    dest1.end().then(function (res) { t.eqls(res, b); }),
+    dest2.end().then(function (res) { t.eqls(res, b); })
   ]);
 })
 .should('allow pipe to take an array of streams to pipe to', function (t) {
@@ -154,7 +189,6 @@ desc('meditate.Meditate')
 
   for (i = 0; i < a.length; i++) b.push(dest1.next().value);
   for (i = 0; i < a.length; i++) c.push(dest2.next().value);
-
 
   return Promise.all([
     Promise.all(b).then(function (res) { t.eqls(res, a); }),
@@ -333,3 +367,99 @@ desc('meditate.Meditate')
     t.eqls(res, ['abc']);
   });
 })
+.should('only stack up returned values', function (t) {
+  const a = ['a', 'b', 'c', 'd', 'e'];
+  const b = [];
+
+  var resolve;
+  const end = new Promise(function (res) {
+    resolve = res;
+  });
+
+  const obs = Meditate(function (d) {
+    if (d !== 'b' && d !== 'd') 
+      return d;
+  }).seq();
+
+  for (var i = 0; i < a.length; i++)
+    obs.sync(a[i]);
+
+  Meditate.Reader(obs, function (err, d) {
+    if (d) {
+      b.push(d);
+    } else {
+      resolve(b);
+    }
+  });
+
+  return end.then(function (res) {
+    t.equals(res.length, 3);
+    t.eqls(res, ['a', 'c', 'e']);
+  });
+})
+.should('only process promise resolutions when in `sequentialise` mode', function (t) {
+  return new Promise(function (resolve) {
+    const a = ['a', 'b', 'c', 'd', 'e'];
+
+    const src = Meditate(function (d) {
+      return (d !== 'b' && d !== 'd') 
+        ? Promise.resolve(d)
+        : Promise.resolve();
+    }).seq();
+
+    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+
+    const b = [];
+    Meditate.Reader(src, function (err, d) {
+      d ? b.push(d) : resolve(b);
+    });
+  })
+  .then(function (res) {
+    t.eqls(res, ['a', 'c', 'e']);
+  });
+})
+.should('handle `sequentialise` when ending element should be skipped', function (t) {
+  return new Promise(function (resolve) {
+    const a = ['a', 'b', 'c', 'd'];
+
+    const src = Meditate(function (d) {
+      return (d !== 'b' && d !== 'd') 
+        ? Promise.resolve(d)
+        : Promise.resolve();
+    }).seq();
+
+    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+
+    const b = [];
+    Meditate.Reader(src, function (err, d) {
+      d ? b.push(d) : resolve(b);
+    });
+  })
+  .then(function (res) {
+    t.eqls(res, ['a', 'c']);
+  });
+});
+//.should('handle `sequentialise` when multiple ending elements should be skipped', function (t) {
+//  return new Promise(function (resolve) {
+////    const a = ['a', 'b', 'c', 'd', 'e', 'f'];
+////    const a = ['a', 'b', 'c', 'd'];
+//    const a = ['a', 'b'];
+//
+//    const src = Meditate(function (d) {
+//      return (d === 'b' || d === 'd') 
+//        ? Promise.resolve(d)
+//        : Promise.resolve();
+//    }).seq();
+//
+//    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+//
+//    const b = [];
+//    Meditate.Reader(src, function (err, d) {
+//      console.log('read', d)
+//      d ? b.push(d) : resolve(b);
+//    });
+//  })
+//  .then(function (res) {
+//    t.eqls(res, ['b', 'd']);
+//  });
+//})

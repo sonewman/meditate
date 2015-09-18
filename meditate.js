@@ -13,50 +13,49 @@ function SetNewWrapPromise(wrap) {
   return wrap.promise;
 }
 
+function UpdatePromise(wrap, promise) {
+  function success(v) { wrap.resolve(v); }
+  function reject(err) { wrap.reject(err); }
+  promise.then(success, reject);
+}
+
 PromiseWrap.prototype.getPromise = function () {
   return this.promise || SetNewWrapPromise(this);
 };
 
-PromiseWrap.prototype.update = function (value) {
+PromiseWrap.prototype._update = function (value) {
   if (isPromise(value)) {
     if (this.promise) UpdatePromise(this, value);
     else this.promise = value;
-    return value;
 
   } else {
-    SetNewWrapPromise(this);
+    if (!this.promise) SetNewWrapPromise(this);
     this.resolve(value);
-    return this.promise;
   }
 };
 
-function UpdatePromise(wrap, promise) {
-  function success(v) {
-    wrap.resolve(v);
-  }
-
-  function reject(err) {
-    wrap.reject(err);
-  }
-
-  promise.then(success, reject);
-}
-
-function Chunk() { PromiseWrap.call(this); }
-Chunk.prototype = Object.create(PromiseWrap.prototype, {
-  constructor: { value: Chunk }
-});
-Chunk.prototype.next = null;
+PromiseWrap.prototype.update = function (value) {
+  this._update(value);
+  return this.promise;
+};
 
 function State(owner, opts) {
   this.owner = owner;
   this.options = opts;
   this.buffer = [];
   this.pipes = [];
+  this.srcs = [];
   this.it = it(this);
   this.it.next();
-  this.endPromise = new PromiseWrap();
-  //SetNewWrapPromise(this.endPromise);
+  this.corks = 0;
+  this.pending = 0;
+  this.ending = false;
+  this.ended = false;
+  this.syncEnding = false;
+  this.flushedEnd = false;
+
+  this.ticketList = new TicketList(this);
+  this.pendingList = new PendingList();
 }
 
 State.prototype.owner = null;
@@ -66,9 +65,11 @@ State.prototype.nextPull = null;
 State.prototype.ended = false;
 State.prototype.ending = false;
 State.prototype.syncEnding = false;
+State.prototype.flushedEnd = false;
 
 State.prototype.error = null;
 State.prototype.pipes = null;
+State.prototype.srcs = null;
 State.prototype.buffer = null;
 State.prototype.endPromise = null;
 
@@ -77,11 +78,7 @@ State.prototype.corked = 0;
 State.prototype.pending = 0;
 State.prototype.pendingPipeDrain = false;
 State.prototype.deferEnd = 0;
-
-State.prototype.ondata = function (value) {
-  for (var i = 0; i < this.pipes.length; i += 1)
-    this.pipes[i].write(value);
-};
+State.prototype.seqResolve = false;
 
 function CallHandle(ctx, cb, data, push, end) {
   try {
@@ -115,18 +112,24 @@ State.prototype.write = function (data) {
   }
 };
 
-function FlushBufferToPipes(state, pipes) {
+function OnData(state, value) {
+  if ('function' === typeof state.owner.ondata)
+    state.owner.ondata(value);
+
+  WriteToPipes(state.pipes, value);
+}
+
+function WriteToPipes(pipes, value) {
+  for (var i = 0; i < pipes.length; i += 1)
+    pipes[i].write(value);
+}
+
+function FlushBufferToPipes(state) {
   state.pendingPipeDrain = true;
   state.deferEnd += 1;
 
-  process.nextTick(function () {
-    while (state.pending > 0) {
-      var chunk = state.pop();
-
-      for (var i = 0; i < pipes.length; i++)
-        pipes[i].write(chunk);
-    }
-
+  Promise.resolve().then(function () {
+    while (state.pending > 0) state.pop();
     state.pendingPipeDrain = false;
   });
 }
@@ -135,89 +138,175 @@ State.prototype.addPipe = function (dest) {
   if (this.pipes.indexOf(dest) < 0) {
     this.pipes.push(dest);
 
+    if ('function' === typeof dest.src) {
+      dest.src(this.owner);
+    }
+
     if (!this.pendingPipeDrain)
-      FlushBufferToPipes(this, this.pipes);
+      FlushBufferToPipes(this);
   }
   return dest;
 };
 
+State.prototype.addSrc = function (src) {
+  this.srcs.push(src);
+};
+
 State.prototype.removePipe = function (pipe) {
-  var i = this.pipes.indexOf(dest);
+  var i = this.pipes.indexOf(pipe);
   if (i < 0) this.pipes.splice(i, 1);
   return pipe;
 };
 
-/**
- * @abstract
- * @param {State} state
- * @param {*} value
- * @return {boolean}
- */
+var c = -1;
+function Chunk(value) {
+  this.value = value;
+  this.i = ++c;
+}
+Chunk.prototype.next = null;
+Chunk.prototype.value = null;
+
+function PendingList() {
+  this.head = null;
+  this.tail = null;
+  this.pending = 0;
+}
+
+PendingList.prototype.push = function (chunk) {
+  this.pending += 1;
+
+  if (!this.head) {
+    this.head = this.tail = chunk;
+  } else {
+    this.tail.next = chunk;
+    this.tail = chunk;
+  }
+};
+
+PendingList.prototype.pop = function () {
+  var head = this.head;
+  if (head) {
+    this.head = this.head.next;
+
+    if (!this.head) {
+      this.tail = null;
+    }
+
+    this.pending -= 1;
+    return head;
+  }
+};
+
+function PushValue(state, value) {
+  var chunk = new Chunk(value);
+  state.pending += 1;
+
+  if (state.ticketList.head) {
+    state.ticketList.update(chunk);
+  } else {
+    state.pendingList.push(chunk);
+  }
+}
+
 State.prototype.push = function (value) {
   if (value === undefined) return;
-
-  var chunk;
-  if (this.pipes.length === 0) {
-    chunk = this.nextPush;
-
-    if (this.nextPush !== null) {
-      this.nextPush = chunk.next;
-
-    } else {
-      chunk = new Chunk();
-
-      if (this.nextPull === null) {
-        this.nextPull = this.tail = chunk;
-      } else {
-        this.tail.next = chunk;
-        this.tail = chunk;
-      }
-    }
-
-    // increase pending count
-    this.pending += 1;
-  } else {
-    chunk = new Chunk();
-  }
-
-  chunk.update(value);
-  this.ondata(chunk.promise);
-  return StateIsExpectingData(this);
+  return PushValue(this, value);
 };
 
-/**
- * Is State expected some data
- * @abstract
- * @param {State} state
- * @return {boolean}
- */
-function StateIsExpectingData(state) {
-  return state.nextPull === null
-    || state.nextPush !== null
-    || (state.nextPull === null && state.nextPush === null);
+State.prototype.read = function () {
+  // TODO make read pull from src
 };
 
+var i = -1;
+function Ticket() {
+  this.i = ++i;
+  var self = this;
+  self.promise = new Promise(function (res, rej) {
+    self.resolve = res;
+    self.reject = rej;
+  });
+}
 
-State.prototype.pop = function () {
-  if (this.nextPull !== null) {
-    var chunk = this.nextPull;
-    this.nextPull = this.nextPull.next;
+Ticket.prototype.next = null;
+Ticket.prototype.resolve = null;
+Ticket.prototype.reject = null;
+Ticket.prototype.promise = null;
 
+function TicketList(state) {
+  this.state = state;
+  this.head = null;
+  this.tail = null;
+}
+
+TicketList.prototype.newTicket = function () {
+  var ticket = new Ticket();
+
+  if (!this.head) {
+    this.head = this.tail = ticket;
   } else {
-    var chunk = new Chunk();
-
-    if (this.nextPush === null) {
-      this.nextPush = this.tail = chunk;
-    } else {
-      this.tail.next = chunk;
-      this.tail = chunk;
-    }
+    this.tail.next = ticket;
+    this.tail = ticket;
   }
+
+  return ticket;
+};
+
+TicketList.prototype.update = function (chunk) {
+  var head = this.head;
+  if (!head) return;
+
+  var next = head.next;
 
   // decrease pending count
-  this.pending -= 1;
+  this.state.pending -= 1;
 
-  return WrapChunkPromise(chunk.getPromise(), this);
+  OnData(this.state, chunk.value);
+  head.resolve(chunk.value);
+  this.head = next;
+};
+
+function ResolveValue(state, chunk) {
+  if (isPromise(chunk.value)) {
+    chunk.value.then(function (value) {
+      ResolveValue(state, new Chunk(value));
+    });
+
+  } else if (chunk.value !== undefined) {
+    state.ticketList.update(chunk);
+  } else {
+    state.pending -= 1;
+    UpdateOnPop(state);
+  }
+}
+
+function UpdateOnPop(state) {
+  if (state.pendingList.head) {
+    var chunk = state.pendingList.pop();
+    
+    if (chunk) {
+      if (state.seqResolve) {
+        ResolveValue(state, chunk);
+
+      } else {
+        state.ticketList.update(chunk);
+      }
+    }
+  }
+}
+
+function PopState(state) {
+  if (state.ended && state.pending <= 0)
+    return null;
+
+  var ticket = state.ticketList.newTicket();
+
+  var wrappedPromise = WrapChunkPromise(ticket.promise, state);
+  UpdateOnPop(state);
+  return wrappedPromise;
+}
+
+State.prototype.pop = function () {
+  return PopState(this);
 };
 
 function WrapChunkPromise(promise, state) {
@@ -265,6 +354,23 @@ State.prototype.sync = function (data) {
   return this.write(data);
 };
 
+State.prototype.seq = function () {
+  this.seqResolve = true;
+};
+
+State.prototype.unseq = function () {
+  this.seqResolve = false;
+};
+
+function CreateEndPromise(state) {
+  if (!state.endPromise)
+    state.endPromise = new PromiseWrap();
+
+  if (state.ended) FlushEnd(state);
+
+  return state.endPromise.getPromise();
+}
+
 State.prototype.end = function (data) {
   if (this.ended) {
     if (data !== undefined)
@@ -279,11 +385,12 @@ State.prototype.end = function (data) {
   this.ending = true;
 
   if (data !== undefined) this.write(data);
-  return this.endPromise.getPromise();
+
+  return CreateEndPromise(this);
 };
 
 State.prototype.done = function () {
-  return this.endPromise.getPromise();
+  return CreateEndPromise(this);
 };
 
 /**
@@ -294,7 +401,7 @@ State.prototype.done = function () {
  * @return {Promise}
  */
 function TriggerEndState(state) {
-  process.nextTick(function () {
+  Promise.resolve().then(function () {
     EndState(state);
   });
 }
@@ -313,6 +420,15 @@ function EndState(state) {
   }
 }
 
+function FlushEnd(state) {
+  if (!state.flushedEnd) {
+    state.flushedEnd = true;
+    state.endPromise.update(
+      state.options.end(Promise.all(state.flush()))
+    );
+  }
+}
+
 /**
  * Close the state, happens on the next tick to `end`
  * this gives time for other data to do something before
@@ -321,23 +437,22 @@ function EndState(state) {
 State.prototype.close = function () {
   this.ended = true;
 
-  // call make cork actually flush to transform
-  // rather than end
-  var endData = this.options.end(Promise.all(this.flush()));
-
+  // TODO put this in next tick perhaps?
   for (var i = 0; i < this.pipes.length; i += 1)
     this.pipes[i].end();
 
-  this.endPromise.update(endData);
+  // if a demand has been made for this promise already
+  // fulfill it immediately
+  if (this.endPromise) FlushEnd(this);
 };
 
 State.prototype.flush = function () {
-  var d = [];
+  var data = [];
 
   while ((this.pending + this.corked) > 0)
-    d.push(this.pop());
+    data.push(this.pop());
 
-  return d;
+  return data;
 };
 
 function isPromise(p) {
@@ -369,6 +484,40 @@ function Meditate(op, cb, onend) {
 
   this.__state__ = new State(this, new HandleArgs(arguments));
 }
+
+Meditate.Reader = Reader;
+
+function Reader(obs, fn) {
+  if (!(this instanceof Reader))
+    return new Reader(obs, fn);
+
+  it();
+
+  function ondata(i) {
+    fn(null, i);
+    it();
+  }
+
+  function it() {
+    var d = obs.read();
+    if (d) {
+      d.then(ondata, fn);
+    } else {
+      fn(null, null);
+    }
+  }
+}
+
+function noop() {}
+Meditate.prototype.on
+= Meditate.prototype.once
+= Meditate.prototype.emit
+= Meditate.prototype.removeListener
+= noop;
+
+// method can be overwritten to be called
+// with data after leaving transform
+Meditate.prototype.ondata = null;
 
 Meditate.prototype.next = function (d) {
   return this.__state__.it.next(d);
@@ -404,6 +553,12 @@ Meditate.prototype.pipe = function (dest) {
   return this.__state__.addPipe(dest);
 };
 
+// add a source (reverse pipe)
+Meditate.prototype.src = function (src) {
+  this.__state__.addSrc(src);
+  return this;
+};
+
 Meditate.prototype.unpipe = function (dest) {
   return this.__state__.removePipe(dest);
 };
@@ -426,6 +581,21 @@ Meditate.prototype.uncork = function () {
   return this;
 };
 
+Meditate.prototype.seq
+= Meditate.prototype.sequentialise
+= function () {
+  this.__state__.seq();
+  return this;
+};
+
+Meditate.prototype.unseq
+= Meditate.prototype.unsequentialise
+= Meditate.prototype.throttle
+= function () {
+  this.__state__.unseq();
+  return this;
+};
+
 function MaybeReadState(state) {
   return state.isCorked ? null : state.pop();
 }
@@ -437,10 +607,9 @@ function EndIterator(output, state, started) {
         || state.ending);
 }
 
-function * it(state) {
+function* it(state) {
   var started = false;
   var output = null;
-  var p;
 
   while (true) {
     if (EndIterator(output, state, started))
