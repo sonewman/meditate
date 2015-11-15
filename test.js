@@ -27,7 +27,7 @@ desc('meditate.Meditate')
 
   var called = false;
   const obs = Meditate(function () {
-    return new Promise(function (resolve, reject) {
+    return new Promise(function (resolve) {
       process.nextTick(function () {
         called = true;
         resolve(a[i]);
@@ -47,13 +47,11 @@ desc('meditate.Meditate')
     t.assert(called);
   });
 })
-.should('push data manually skipping iterator', function (t) {
+.should('push data manually returning returned value', function (t) {
   const a = ['a', 'b', 'c', 'd'];
   const b = [];
 
-  var wasNotCalled = true;
   const obs = Meditate(function (d) {
-    wasNotCalled = false;
     return d;
   });
 
@@ -66,6 +64,60 @@ desc('meditate.Meditate')
   return Promise.all(b).then(function (res) {
     t.eqls(res, a);
   });
+})
+.should('only stack up returned values', function (t) {
+  const a = ['a', 'b', 'c', 'd', 'e'];
+  const b = [];
+
+  var resolve;
+  var reject;
+  const end = new Promise(function (res, rej) {
+    resolve = res;
+    reject = rej;
+  });
+
+  const obs = Meditate(function (d) {
+    if (d !== 'b' && d !== 'd') 
+      return d;
+  });
+
+  for (var i = 0; i < a.length; i++)
+    obs.sync(a[i]);
+
+    Meditate.Reader(obs, function (err, d) {
+    if (d) {
+      b.push(d);
+    } else {
+      resolve(b);
+    }
+  });
+
+  return end.then(function (res) {
+    t.equals(res.length, 3);
+    t.eqls(res, ['a', 'c', 'e']);
+  });
+})
+.should('only process promise resolutions when in `sequentialise` mode', function (t) {
+  return new Promise(function (resolve, reject) {
+    const a = ['a', 'b', 'c', 'd'];
+
+    const src = Meditate(function (d) {
+      return (d !== 'b' && d !== 'd') 
+        ? Promise.resolve(d)
+        : Promise.resolve();
+    }).seq();
+
+    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+
+    const b = [];
+    Meditate.Reader(src, function (err, d) {
+      console.log('read', d);
+      d ? b.push(d) : resolve(b);
+    });
+  })
+//  .then(function (res) {
+//    t.eqls(res, ['a', 'c', 'e']);
+//  });
 })
 .should('call end callback passing on returned value', function (t) {
   const a = ['a', 'b', 'c', 'd'];
@@ -90,7 +142,7 @@ desc('meditate.Meditate')
   for (var i = 0; i < a.length; i++) src.write(a[i]);
   
   var end1 = src.end();
-  var end2 = src.end()
+  var end2 = src.end();
   
   t.equals(end1, end2);
 
@@ -332,4 +384,4 @@ desc('meditate.Meditate')
   return done.then(function (res) {
     t.eqls(res, ['abc']);
   });
-})
+});

@@ -53,10 +53,15 @@ function State(owner, opts) {
   this.options = opts;
   this.buffer = [];
   this.pipes = [];
+  this.srcs = [];
   this.it = it(this);
   this.it.next();
-  this.endPromise = new PromiseWrap();
-  //SetNewWrapPromise(this.endPromise);
+  this.corks = 0;
+  this.pending = 0;
+  this.ending = false;
+  this.ended = false;
+  this.syncEnding = false;
+  this.flushedEnd = false;
 }
 
 State.prototype.owner = null;
@@ -66,9 +71,11 @@ State.prototype.nextPull = null;
 State.prototype.ended = false;
 State.prototype.ending = false;
 State.prototype.syncEnding = false;
+State.prototype.flushedEnd = false;
 
 State.prototype.error = null;
 State.prototype.pipes = null;
+State.prototype.srcs = null;
 State.prototype.buffer = null;
 State.prototype.endPromise = null;
 
@@ -77,11 +84,7 @@ State.prototype.corked = 0;
 State.prototype.pending = 0;
 State.prototype.pendingPipeDrain = false;
 State.prototype.deferEnd = 0;
-
-State.prototype.ondata = function (value) {
-  for (var i = 0; i < this.pipes.length; i += 1)
-    this.pipes[i].write(value);
-};
+State.prototype.seqResolve = false;
 
 function CallHandle(ctx, cb, data, push, end) {
   try {
@@ -115,17 +118,25 @@ State.prototype.write = function (data) {
   }
 };
 
-function FlushBufferToPipes(state, pipes) {
+function OnData(state, value) {
+  if ('function' === typeof state.owner.ondata)
+    state.owner.ondata(value);
+
+  WriteToPipes(state.pipes, value);
+}
+
+function WriteToPipes(pipes, value) {
+  for (var i = 0; i < pipes.length; i += 1)
+    pipes[i].write(value);
+}
+
+function FlushBufferToPipes(state) {
   state.pendingPipeDrain = true;
   state.deferEnd += 1;
 
   process.nextTick(function () {
-    while (state.pending > 0) {
-      var chunk = state.pop();
-
-      for (var i = 0; i < pipes.length; i++)
-        pipes[i].write(chunk);
-    }
+    while (state.pending > 0)
+      OnData(state, state.pop());
 
     state.pendingPipeDrain = false;
   });
@@ -135,17 +146,86 @@ State.prototype.addPipe = function (dest) {
   if (this.pipes.indexOf(dest) < 0) {
     this.pipes.push(dest);
 
+    if ('function' === typeof dest.src) {
+      dest.src(this.owner);
+    }
+
     if (!this.pendingPipeDrain)
-      FlushBufferToPipes(this, this.pipes);
+      FlushBufferToPipes(this);
   }
   return dest;
 };
 
+State.prototype.addSrc = function (src) {
+  this.srcs.push(src);
+};
+
 State.prototype.removePipe = function (pipe) {
-  var i = this.pipes.indexOf(dest);
+  var i = this.pipes.indexOf(pipe);
   if (i < 0) this.pipes.splice(i, 1);
   return pipe;
 };
+
+function PushData(state, value) {
+  var chunk;
+  if (state.pipes.length === 0) {
+
+    if (state.nextPush !== null) {
+      chunk = state.nextPush;
+      state.nextPush = chunk.next;
+
+    } else {
+      chunk = new Chunk();
+
+      if (state.nextPull === null) {
+        state.nextPull = state.tail = chunk;
+      } else {
+        state.tail.next = chunk;
+        state.tail = chunk;
+      }
+    }
+
+    // increase pending count
+    state.pending += 1;
+  } else {
+    chunk = new Chunk();
+  }
+
+  chunk.update(value);
+  OnData(state, chunk.promise);
+  return StateIsExpectingData(state);
+}
+
+function StartPush(state, value) {
+  if (value === undefined) return;
+
+  if (state.seqResolve && isPromise(value)) {
+    value.then(function (v) {
+      console.log('ddd', v);
+      console.log(!v, HasNextData(state))
+
+//      if (!v) {
+
+//        if (HasNextData(state))
+//          state.push(state.pop());
+
+//      } else {
+        /// TODO if ! v then we need to
+        // trigger the fetching of the next v
+        StartPush(state, v);
+//      }
+    });
+
+    return;
+  }
+
+  return PushData(state, value);
+}
+
+function HasNextData(state) {
+//  console.log(state);
+  return state.nextPull !== null || state.nextPush !== null;
+}
 
 /**
  * @abstract
@@ -154,35 +234,7 @@ State.prototype.removePipe = function (pipe) {
  * @return {boolean}
  */
 State.prototype.push = function (value) {
-  if (value === undefined) return;
-
-  var chunk;
-  if (this.pipes.length === 0) {
-    chunk = this.nextPush;
-
-    if (this.nextPush !== null) {
-      this.nextPush = chunk.next;
-
-    } else {
-      chunk = new Chunk();
-
-      if (this.nextPull === null) {
-        this.nextPull = this.tail = chunk;
-      } else {
-        this.tail.next = chunk;
-        this.tail = chunk;
-      }
-    }
-
-    // increase pending count
-    this.pending += 1;
-  } else {
-    chunk = new Chunk();
-  }
-
-  chunk.update(value);
-  this.ondata(chunk.promise);
-  return StateIsExpectingData(this);
+  return StartPush(this, value);
 };
 
 /**
@@ -195,16 +247,23 @@ function StateIsExpectingData(state) {
   return state.nextPull === null
     || state.nextPush !== null
     || (state.nextPull === null && state.nextPush === null);
+}
+
+State.prototype.read = function () {
+  // TODO make read pull from src
 };
 
-
 State.prototype.pop = function () {
+  var chunk;
+
   if (this.nextPull !== null) {
-    var chunk = this.nextPull;
+    chunk = this.nextPull;
     this.nextPull = this.nextPull.next;
 
   } else {
-    var chunk = new Chunk();
+    chunk = new Chunk();
+
+    if (this.ended) return null;
 
     if (this.nextPush === null) {
       this.nextPush = this.tail = chunk;
@@ -265,6 +324,23 @@ State.prototype.sync = function (data) {
   return this.write(data);
 };
 
+State.prototype.seq = function () {
+  this.seqResolve = true;
+};
+
+State.prototype.unseq = function () {
+  this.seqResolve = false;
+};
+
+function CreateEndPromise(state) {
+  if (!state.endPromise)
+    state.endPromise = new PromiseWrap();
+
+  if (state.ended) FlushEnd(state);
+
+  return state.endPromise.getPromise();
+}
+
 State.prototype.end = function (data) {
   if (this.ended) {
     if (data !== undefined)
@@ -279,11 +355,12 @@ State.prototype.end = function (data) {
   this.ending = true;
 
   if (data !== undefined) this.write(data);
-  return this.endPromise.getPromise();
+
+  return CreateEndPromise(this);
 };
 
 State.prototype.done = function () {
-  return this.endPromise.getPromise();
+  return CreateEndPromise(this);
 };
 
 /**
@@ -313,6 +390,15 @@ function EndState(state) {
   }
 }
 
+function FlushEnd(state) {
+  if (!state.flushedEnd) {
+    state.flushedEnd = true;
+    state.endPromise.update(
+      state.options.end(Promise.all(state.flush()))
+    );
+  }
+}
+
 /**
  * Close the state, happens on the next tick to `end`
  * this gives time for other data to do something before
@@ -321,23 +407,22 @@ function EndState(state) {
 State.prototype.close = function () {
   this.ended = true;
 
-  // call make cork actually flush to transform
-  // rather than end
-  var endData = this.options.end(Promise.all(this.flush()));
-
+  // TODO put this in next tick perhaps?
   for (var i = 0; i < this.pipes.length; i += 1)
     this.pipes[i].end();
 
-  this.endPromise.update(endData);
+  // if a demand has been made for this promise already
+  // fulfill it immediately
+  if (this.endPromise) FlushEnd(this);
 };
 
 State.prototype.flush = function () {
-  var d = [];
+  var data = [];
 
   while ((this.pending + this.corked) > 0)
-    d.push(this.pop());
+    data.push(this.pop());
 
-  return d;
+  return data;
 };
 
 function isPromise(p) {
@@ -369,6 +454,42 @@ function Meditate(op, cb, onend) {
 
   this.__state__ = new State(this, new HandleArgs(arguments));
 }
+
+Meditate.Reader = Reader;
+
+function Reader(obs, fn) {
+  if (!(this instanceof Reader))
+    return new Reader(obs, fn);
+
+  it();
+
+  function ondata(i) {
+    console.log('i', i)
+    fn(null, i);
+    it();
+  }
+
+  function it() {
+    var d = obs.read();
+    console.log(d)
+    if (d) {
+      d.then(ondata, fn);
+    } else {
+      fn(null, null);
+    }
+  }
+}
+
+function noop() {}
+Meditate.prototype.on
+= Meditate.prototype.once
+= Meditate.prototype.emit
+= Meditate.prototype.removeListener
+= noop;
+
+// method can be overwritten to be called
+// with data after leaving transform
+Meditate.prototype.ondata = null;
 
 Meditate.prototype.next = function (d) {
   return this.__state__.it.next(d);
@@ -404,6 +525,12 @@ Meditate.prototype.pipe = function (dest) {
   return this.__state__.addPipe(dest);
 };
 
+// add a source (reverse pipe)
+Meditate.prototype.src = function (src) {
+  this.__state__.addSrc(src);
+  return this;
+};
+
 Meditate.prototype.unpipe = function (dest) {
   return this.__state__.removePipe(dest);
 };
@@ -426,6 +553,21 @@ Meditate.prototype.uncork = function () {
   return this;
 };
 
+Meditate.prototype.seq
+= Meditate.prototype.sequentialise
+= function () {
+  this.__state__.seq();
+  return this;
+};
+
+Meditate.prototype.unseq
+= Meditate.prototype.unsequentialise
+= Meditate.prototype.throttle
+= function () {
+  this.__state__.unseq();
+  return this;
+};
+
 function MaybeReadState(state) {
   return state.isCorked ? null : state.pop();
 }
@@ -437,10 +579,9 @@ function EndIterator(output, state, started) {
         || state.ending);
 }
 
-function * it(state) {
+function* it(state) {
   var started = false;
   var output = null;
-  var p;
 
   while (true) {
     if (EndIterator(output, state, started))
