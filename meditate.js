@@ -13,40 +13,31 @@ function SetNewWrapPromise(wrap) {
   return wrap.promise;
 }
 
+function UpdatePromise(wrap, promise) {
+  function success(v) { wrap.resolve(v); }
+  function reject(err) { wrap.reject(err); }
+  promise.then(success, reject);
+}
+
 PromiseWrap.prototype.getPromise = function () {
   return this.promise || SetNewWrapPromise(this);
 };
 
-PromiseWrap.prototype.update = function (value) {
+PromiseWrap.prototype._update = function (value) {
   if (isPromise(value)) {
     if (this.promise) UpdatePromise(this, value);
     else this.promise = value;
-    return value;
 
   } else {
-    SetNewWrapPromise(this);
+    if (!this.promise) SetNewWrapPromise(this);
     this.resolve(value);
-    return this.promise;
   }
 };
 
-function UpdatePromise(wrap, promise) {
-  function success(v) {
-    wrap.resolve(v);
-  }
-
-  function reject(err) {
-    wrap.reject(err);
-  }
-
-  promise.then(success, reject);
-}
-
-function Chunk() { PromiseWrap.call(this); }
-Chunk.prototype = Object.create(PromiseWrap.prototype, {
-  constructor: { value: Chunk }
-});
-Chunk.prototype.next = null;
+PromiseWrap.prototype.update = function (value) {
+  this._update(value);
+  return this.promise;
+};
 
 function State(owner, opts) {
   this.owner = owner;
@@ -62,6 +53,9 @@ function State(owner, opts) {
   this.ended = false;
   this.syncEnding = false;
   this.flushedEnd = false;
+
+  this.ticketList = new TicketList(this);
+  this.pendingList = new PendingList();
 }
 
 State.prototype.owner = null;
@@ -134,10 +128,8 @@ function FlushBufferToPipes(state) {
   state.pendingPipeDrain = true;
   state.deferEnd += 1;
 
-  process.nextTick(function () {
-    while (state.pending > 0)
-      OnData(state, state.pop());
-
+  Promise.resolve().then(function () {
+    while (state.pending > 0) state.pop();
     state.pendingPipeDrain = false;
   });
 }
@@ -166,117 +158,155 @@ State.prototype.removePipe = function (pipe) {
   return pipe;
 };
 
-function PushData(state, value) {
-  var chunk;
-  if (state.pipes.length === 0) {
+var c = -1;
+function Chunk(value) {
+  this.value = value;
+  this.i = ++c;
+}
+Chunk.prototype.next = null;
+Chunk.prototype.value = null;
 
-    if (state.nextPush !== null) {
-      chunk = state.nextPush;
-      state.nextPush = chunk.next;
+function PendingList() {
+  this.head = null;
+  this.tail = null;
+  this.pending = 0;
+}
 
-    } else {
-      chunk = new Chunk();
+PendingList.prototype.push = function (chunk) {
+  this.pending += 1;
 
-      if (state.nextPull === null) {
-        state.nextPull = state.tail = chunk;
-      } else {
-        state.tail.next = chunk;
-        state.tail = chunk;
-      }
-    }
-
-    // increase pending count
-    state.pending += 1;
+  if (!this.head) {
+    this.head = this.tail = chunk;
   } else {
-    chunk = new Chunk();
+    this.tail.next = chunk;
+    this.tail = chunk;
   }
-
-  chunk.update(value);
-  OnData(state, chunk.promise);
-  return StateIsExpectingData(state);
-}
-
-function StartPush(state, value) {
-  if (value === undefined) return;
-
-  if (state.seqResolve && isPromise(value)) {
-    value.then(function (v) {
-      console.log('ddd', v);
-      console.log(!v, HasNextData(state))
-
-//      if (!v) {
-
-//        if (HasNextData(state))
-//          state.push(state.pop());
-
-//      } else {
-        /// TODO if ! v then we need to
-        // trigger the fetching of the next v
-        StartPush(state, v);
-//      }
-    });
-
-    return;
-  }
-
-  return PushData(state, value);
-}
-
-function HasNextData(state) {
-//  console.log(state);
-  return state.nextPull !== null || state.nextPush !== null;
-}
-
-/**
- * @abstract
- * @param {State} state
- * @param {*} value
- * @return {boolean}
- */
-State.prototype.push = function (value) {
-  return StartPush(this, value);
 };
 
-/**
- * Is State expected some data
- * @abstract
- * @param {State} state
- * @return {boolean}
- */
-function StateIsExpectingData(state) {
-  return state.nextPull === null
-    || state.nextPush !== null
-    || (state.nextPull === null && state.nextPush === null);
+PendingList.prototype.pop = function () {
+  var head = this.head;
+  if (head) {
+    this.head = this.head.next;
+
+    if (!this.head) {
+      this.tail = null;
+    }
+
+    this.pending -= 1;
+    return head;
+  }
+};
+
+function PushValue(state, value) {
+  var chunk = new Chunk(value);
+  state.pending += 1;
+
+  if (state.ticketList.head) {
+    state.ticketList.update(chunk);
+  } else {
+    state.pendingList.push(chunk);
+  }
 }
+
+State.prototype.push = function (value) {
+  if (value === undefined) return;
+  return PushValue(this, value);
+};
 
 State.prototype.read = function () {
   // TODO make read pull from src
 };
 
-State.prototype.pop = function () {
-  var chunk;
+var i = -1;
+function Ticket() {
+  this.i = ++i;
+  var self = this;
+  self.promise = new Promise(function (res, rej) {
+    self.resolve = res;
+    self.reject = rej;
+  });
+}
 
-  if (this.nextPull !== null) {
-    chunk = this.nextPull;
-    this.nextPull = this.nextPull.next;
+Ticket.prototype.next = null;
+Ticket.prototype.resolve = null;
+Ticket.prototype.reject = null;
+Ticket.prototype.promise = null;
 
+function TicketList(state) {
+  this.state = state;
+  this.head = null;
+  this.tail = null;
+}
+
+TicketList.prototype.newTicket = function () {
+  var ticket = new Ticket();
+
+  if (!this.head) {
+    this.head = this.tail = ticket;
   } else {
-    chunk = new Chunk();
-
-    if (this.ended) return null;
-
-    if (this.nextPush === null) {
-      this.nextPush = this.tail = chunk;
-    } else {
-      this.tail.next = chunk;
-      this.tail = chunk;
-    }
+    this.tail.next = ticket;
+    this.tail = ticket;
   }
 
-  // decrease pending count
-  this.pending -= 1;
+  return ticket;
+};
 
-  return WrapChunkPromise(chunk.getPromise(), this);
+TicketList.prototype.update = function (chunk) {
+  var head = this.head;
+  if (!head) return;
+
+  var next = head.next;
+
+  // decrease pending count
+  this.state.pending -= 1;
+
+  OnData(this.state, chunk.value);
+  head.resolve(chunk.value);
+  this.head = next;
+};
+
+function ResolveValue(state, chunk) {
+  if (isPromise(chunk.value)) {
+    chunk.value.then(function (value) {
+      ResolveValue(state, new Chunk(value));
+    });
+
+  } else if (chunk.value !== undefined) {
+    state.ticketList.update(chunk);
+  } else {
+    state.pending -= 1;
+    UpdateOnPop(state);
+  }
+}
+
+function UpdateOnPop(state) {
+  if (state.pendingList.head) {
+    var chunk = state.pendingList.pop();
+    
+    if (chunk) {
+      if (state.seqResolve) {
+        ResolveValue(state, chunk);
+
+      } else {
+        state.ticketList.update(chunk);
+      }
+    }
+  }
+}
+
+function PopState(state) {
+  if (state.ended && state.pending <= 0)
+    return null;
+
+  var ticket = state.ticketList.newTicket();
+
+  var wrappedPromise = WrapChunkPromise(ticket.promise, state);
+  UpdateOnPop(state);
+  return wrappedPromise;
+}
+
+State.prototype.pop = function () {
+  return PopState(this);
 };
 
 function WrapChunkPromise(promise, state) {
@@ -371,7 +401,7 @@ State.prototype.done = function () {
  * @return {Promise}
  */
 function TriggerEndState(state) {
-  process.nextTick(function () {
+  Promise.resolve().then(function () {
     EndState(state);
   });
 }
@@ -464,14 +494,12 @@ function Reader(obs, fn) {
   it();
 
   function ondata(i) {
-    console.log('i', i)
     fn(null, i);
     it();
   }
 
   function it() {
     var d = obs.read();
-    console.log(d)
     if (d) {
       d.then(ondata, fn);
     } else {
