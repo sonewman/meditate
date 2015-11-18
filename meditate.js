@@ -59,9 +59,6 @@ function State(owner, opts) {
 }
 
 State.prototype.owner = null;
-State.prototype.tail = null;
-State.prototype.nextPush = null;
-State.prototype.nextPull = null;
 State.prototype.ended = false;
 State.prototype.ending = false;
 State.prototype.syncEnding = false;
@@ -78,6 +75,8 @@ State.prototype.corked = 0;
 State.prototype.pending = 0;
 State.prototype.pendingPipeDrain = false;
 State.prototype.deferEnd = 0;
+State.prototype.ticketList = null;
+State.prototype.pendingList = null;
 State.prototype.seqResolve = false;
 
 function CallHandle(ctx, cb, data, push, end) {
@@ -112,11 +111,11 @@ State.prototype.write = function (data) {
   }
 };
 
-function OnData(state, value) {
-  if ('function' === typeof state.owner.ondata)
-    state.owner.ondata(value);
+function OnData(owner, pipes, value) {
+  if ('function' === typeof owner.ondata)
+    owner.ondata(value);
 
-  WriteToPipes(state.pipes, value);
+  WriteToPipes(pipes, value);
 }
 
 function WriteToPipes(pipes, value) {
@@ -124,14 +123,18 @@ function WriteToPipes(pipes, value) {
     pipes[i].write(value);
 }
 
-function FlushBufferToPipes(state) {
-  state.pendingPipeDrain = true;
-  state.deferEnd += 1;
-
-  Promise.resolve().then(function () {
+function CreateFlush(state) {
+  return function () {
     while (state.pending > 0) state.pop();
     state.pendingPipeDrain = false;
-  });
+  };
+}
+
+function FlushBufferToPipes(state) {
+  if (state.pendingPipeDrain) return;
+  state.pendingPipeDrain = true;
+  state.deferEnd += 1;
+  Promise.resolve().then(CreateFlush(state));
 }
 
 State.prototype.addPipe = function (dest) {
@@ -260,7 +263,7 @@ TicketList.prototype.update = function (chunk) {
   // decrease pending count
   this.state.pending -= 1;
 
-  OnData(this.state, chunk.value);
+  OnData(this.state.owner, this.state.pipes, chunk.value);
   head.resolve(chunk.value);
   this.head = next;
 };
@@ -282,21 +285,24 @@ function ResolveValue(state, chunk) {
 function UpdateOnPop(state) {
   if (state.pendingList.head) {
     var chunk = state.pendingList.pop();
-    
-    if (chunk) {
-      if (state.seqResolve) {
-        ResolveValue(state, chunk);
 
-      } else {
+    if (chunk) {
+
+      if (state.seqResolve)
+        ResolveValue(state, chunk);
+      else
         state.ticketList.update(chunk);
-      }
     }
+  } else {
+
+    if (state.ended && state.pending <= 0)
+      state.ticketList.update(new Chunk());
   }
 }
 
 function PopState(state) {
   if (state.ended && state.pending <= 0)
-    return null;
+    return Promise.resolve(null);
 
   var ticket = state.ticketList.newTicket();
 
@@ -485,6 +491,20 @@ function Meditate(op, cb, onend) {
   this.__state__ = new State(this, new HandleArgs(arguments));
 }
 
+function Contemplate(op, cb, onend) {
+  if (!(this instanceof Contemplate))
+    return new Contemplate(op, cb, onend);
+
+  Meditate.call(this, op, cb, onend);
+  this.__state__.seqResolve = true;
+}
+
+Contemplate.prototype = Object.create(Meditate.prototype, {
+  constructor: { value: Contemplate }
+});
+
+Meditate.Contemplate = Contemplate;
+
 Meditate.Reader = Reader;
 
 function Reader(obs, fn) {
@@ -495,20 +515,20 @@ function Reader(obs, fn) {
 
   function ondata(i) {
     fn(null, i);
-    it();
+    if (i != null) it();
   }
 
   function it() {
-    var d = obs.read();
-    if (d) {
-      d.then(ondata, fn);
-    } else {
-      fn(null, null);
-    }
+    obs.read().then(ondata, fn);
   }
 }
 
 function noop() {}
+
+// FIXME Below API is a hack to allow Node Streams
+// to be piped into these streams.
+//
+// TODO remove below and create a stream adapter
 Meditate.prototype.on
 = Meditate.prototype.once
 = Meditate.prototype.emit

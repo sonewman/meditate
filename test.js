@@ -86,10 +86,10 @@ desc('meditate.Meditate')
   const src = Meditate();
 
   for (var i = 0; i < a.length; i++) src.write(a[i]);
-  
+
   var end1 = src.end();
   var end2 = src.end();
-  
+
   t.equals(end1, end2);
 
   return end1.then(function (res1) {
@@ -218,7 +218,7 @@ desc('meditate.Meditate')
 
   t.isFalse(transformCalled);
   src.uncork();
-  
+
   for (i = 0; i < a.length; i++) b.push(src.read());
 
   return Promise.all(b).then(function (res) {
@@ -240,7 +240,7 @@ desc('meditate.Meditate')
   const b = [];
 
   const src = Meditate();
-  for (var i = 0; i < a.length; i++) 
+  for (var i = 0; i < a.length; i++)
     b.push(src.next(a[i]).value);
 
   return src.end().then(function (res) {
@@ -265,7 +265,7 @@ desc('meditate.Meditate')
   const dest = src.pipe(Meditate());
 
   for (var i = 0; i < a.length; i++) src.write(a[i]);
- 
+
   const d = [];
   for (i = 0; i < a.length; i++) d.push(dest.read());
 
@@ -340,7 +340,7 @@ desc('meditate.Meditate')
   const src = Meditate(function () {
     throw err;
   });
-  
+
   const dest = Meditate();
   src.write('abc');
   src.pipe(dest);
@@ -357,7 +357,7 @@ desc('meditate.Meditate')
 })
 .should('allow access to the ending promise before end', function (t) {
   const src = Meditate();
-  
+
   src.write('abc');
 
   var done = src.done();
@@ -377,7 +377,7 @@ desc('meditate.Meditate')
   });
 
   const obs = Meditate(function (d) {
-    if (d !== 'b' && d !== 'd') 
+    if (d !== 'b' && d !== 'd')
       return d;
   }).seq();
 
@@ -402,7 +402,7 @@ desc('meditate.Meditate')
     const a = ['a', 'b', 'c', 'd', 'e'];
 
     const src = Meditate(function (d) {
-      return (d !== 'b' && d !== 'd') 
+      return (d !== 'b' && d !== 'd')
         ? Promise.resolve(d)
         : Promise.resolve();
     }).seq();
@@ -423,7 +423,7 @@ desc('meditate.Meditate')
     const a = ['a', 'b', 'c', 'd'];
 
     const src = Meditate(function (d) {
-      return (d !== 'b' && d !== 'd') 
+      return (d !== 'b' && d !== 'd')
         ? Promise.resolve(d)
         : Promise.resolve();
     }).seq();
@@ -438,28 +438,95 @@ desc('meditate.Meditate')
   .then(function (res) {
     t.eqls(res, ['a', 'c']);
   });
+})
+.should('sequentialise when multiple ending elements should be skipped', function (t) {
+  return new Promise(function (resolve) {
+    const a = ['a', 'b', 'c', 'd', 'e', 'f'];
+
+    const src = Meditate.Contemplate(function (d) {
+      return (d === 'b' || d === 'd')
+        ? Promise.resolve(d)
+        : Promise.resolve();
+    }).seq();
+
+    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+
+    const b = [];
+    Meditate.Reader(src, function (err, d) {
+      d ? b.push(d) : resolve(b);
+    });
+  })
+  .then(function (res) {
+    t.eqls(res, ['b', 'd']);
+  });
+})
+.should('sequentialise in correct order despite resolution', function (t) {
+  return new Promise(function (end) {
+    const a = ['a', 'b'];
+
+    var resolve;
+    function createResolve(res, i) {
+      return function() {
+        res(i);
+      };
+    }
+
+    const src = Meditate.Contemplate(function (d) {
+      if (d === 'a') {
+        return new Promise(function (res) {
+          resolve = createResolve(res, d);
+        });
+      } else {
+        return new Promise(function (res) {
+          res(d);
+          process.nextTick(resolve);
+        });
+      }
+    });
+
+    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+
+    const b = [];
+    Meditate.Reader(src, function (err, d) {
+      d ? b.push(d) : end(b);
+    });
+  })
+  .then(function (res) {
+    t.eqls(res, ['a', 'b']);
+  });
+})
+.should('sequentialise in correct order despite resolution and still flatten', function (t) {
+  return new Promise(function (end) {
+    const a = ['a', 'b'];
+
+    var resolve;
+    function createResolve(res, i) {
+      return function() {
+        res(i);
+      };
+    }
+
+    const src = Meditate.Contemplate(function (d) {
+      if (d === 'a') {
+        return new Promise(function (res) {
+          resolve = createResolve(res, undefined);
+        });
+      } else {
+        return new Promise(function (res) {
+          res(d);
+          process.nextTick(resolve);
+        });
+      }
+    });
+
+    for (var i = 0; i < a.length; i++) src.sync(a[i]);
+
+    const b = [];
+    Meditate.Reader(src, function (err, d) {
+      d ? b.push(d) : end(b);
+    });
+  })
+  .then(function (res) {
+    t.eqls(res, ['b']);
+  });
 });
-//.should('handle `sequentialise` when multiple ending elements should be skipped', function (t) {
-//  return new Promise(function (resolve) {
-////    const a = ['a', 'b', 'c', 'd', 'e', 'f'];
-////    const a = ['a', 'b', 'c', 'd'];
-//    const a = ['a', 'b'];
-//
-//    const src = Meditate(function (d) {
-//      return (d === 'b' || d === 'd') 
-//        ? Promise.resolve(d)
-//        : Promise.resolve();
-//    }).seq();
-//
-//    for (var i = 0; i < a.length; i++) src.sync(a[i]);
-//
-//    const b = [];
-//    Meditate.Reader(src, function (err, d) {
-//      console.log('read', d)
-//      d ? b.push(d) : resolve(b);
-//    });
-//  })
-//  .then(function (res) {
-//    t.eqls(res, ['b', 'd']);
-//  });
-//})
