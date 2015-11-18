@@ -1,5 +1,5 @@
 # Meditate
-[![Code Climate](https://codeclimate.com/github/sonewman/meditate/badges/gpa.svg)](https://codeclimate.com/github/sonewman/meditate)
+[![Code Climate](https://codeclimate.com/github/sonewman/meditate/badges/gpa.svg)](https://codeclimate.com/github/sonewman/meditate) [![Build Status](https://travis-ci.org/sonewman/meditate.svg?branch=master)](https://travis-ci.org/sonewman/meditate)
 
 Meditate on your streaming data with a promise!
 
