@@ -1,43 +1,16 @@
 module.exports = Meditate;
 
-function PromiseWrap() {}
+function PromiseWrap() {
+  var self = this;
+  self.promise = new Promise(function (res, rej) {
+    self.resolve = res;
+    self.reject = rej;
+  });
+}
+
 PromiseWrap.prototype.resolve = null;
 PromiseWrap.prototype.reject = null;
 PromiseWrap.prototype.promise = null;
-
-function SetNewWrapPromise(wrap) {
-  wrap.promise = new Promise(function (resolve, reject) {
-    wrap.resolve = resolve;
-    wrap.reject = reject;
-  });
-  return wrap.promise;
-}
-
-function UpdatePromise(wrap, promise) {
-  function success(v) { wrap.resolve(v); }
-  function reject(err) { wrap.reject(err); }
-  promise.then(success, reject);
-}
-
-PromiseWrap.prototype.getPromise = function () {
-  return this.promise || SetNewWrapPromise(this);
-};
-
-PromiseWrap.prototype._update = function (value) {
-  if (isPromise(value)) {
-    if (this.promise) UpdatePromise(this, value);
-    else this.promise = value;
-
-  } else {
-    if (!this.promise) SetNewWrapPromise(this);
-    this.resolve(value);
-  }
-};
-
-PromiseWrap.prototype.update = function (value) {
-  this._update(value);
-  return this.promise;
-};
 
 function State(owner, opts) {
   this.owner = owner;
@@ -223,17 +196,14 @@ State.prototype.read = function () {
 var i = -1;
 function Ticket() {
   this.i = ++i;
-  var self = this;
-  self.promise = new Promise(function (res, rej) {
-    self.resolve = res;
-    self.reject = rej;
-  });
+  PromiseWrap.call(this);
 }
 
+Ticket.prototype = Object.create(PromiseWrap.prototype, {
+  constructor: { value: Ticket }
+});
+
 Ticket.prototype.next = null;
-Ticket.prototype.resolve = null;
-Ticket.prototype.reject = null;
-Ticket.prototype.promise = null;
 
 function TicketList(state) {
   this.state = state;
@@ -374,7 +344,7 @@ function CreateEndPromise(state) {
 
   if (state.ended) FlushEnd(state);
 
-  return state.endPromise.getPromise();
+  return state.endPromise.promise;
 }
 
 State.prototype.end = function (data) {
@@ -429,7 +399,7 @@ function EndState(state) {
 function FlushEnd(state) {
   if (!state.flushedEnd) {
     state.flushedEnd = true;
-    state.endPromise.update(
+    state.endPromise.resolve(
       state.options.end(Promise.all(state.flush()))
     );
   }
