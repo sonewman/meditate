@@ -1,0 +1,129 @@
+env:
+  node: true
+  es6: true
+  mocha: true
+
+root: true
+
+# parser: '@typescript-eslint/parser'
+extends:
+  - 'eslint:recommended'
+  # - 'prettier'
+
+plugins:
+  # - '@typescript-eslint'
+  - 'jest'
+  # - 'prettier'
+
+parserOptions:
+  # project: './tsconfig.json'
+  sourceType: "module"
+
+  # tsconfigRootDir: './'
+  # project:
+  #   - './tsconfig.eslint.json'
+  #   - './packages/*/tsconfig.package.json'
+  #debugLevel: true
+
+rules:
+  # TODO Fix the code and turn these recommended rules back on
+  # no-useless-escape: 'off'
+  # no-case-declarations: 'off'
+  # no-unsafe-finally: 'off'
+  require-yield: 'off'
+  no-empty: 'off'
+  no-unused-vars: 'off'
+  # getter-return: 'off'
+  # no-useless-catch: 'off'
+  # no-dupe-class-members: 'off'
+  # no-setter-return: 'off'
+  # no-async-promise-executor: 'off'
+
+  # Useful optional rules not in eslint:recommended
+  accessor-pairs: error
+  block-scoped-var: error
+  no-template-curly-in-string: error
+  no-await-in-loop: error
+  no-label-var: error
+  symbol-description: error
+  prefer-spread: error
+  no-use-before-define:
+    - error
+    - nofunc
+
+  semi: error
+  strict:
+    - error
+    - never
+  dot-notation: error
+  linebreak-style: error
+  no-caller: error
+  no-continue: error
+  no-constructor-return: error
+  no-loop-func: error
+  no-self-compare: error
+  no-unmodified-loop-condition: error
+
+overrides:
+  # Test Files
+  - files: '*.ts'
+
+    parser: '@typescript-eslint/parser'
+    extends:
+      - 'eslint:recommended'
+      - 'plugin:@typescript-eslint/recommended'
+      - 'plugin:@typescript-eslint/eslint-recommended'
+
+    plugins:
+      - '@typescript-eslint'
+      - 'jest'
+
+    parserOptions:
+      sourceType: "module"
+      tsconfigRootDir: './'
+      project:
+        - './tsconfig.eslint.json'
+      #   - './packages/*/tsconfig.package.json'
+      #debugLevel: true
+
+    rules:
+      # TODO Fix the code and turn these recommended rules back on
+      # no-useless-escape: 'off'
+      # no-case-declarations: 'off'
+      # no-unsafe-finally: 'off'
+      require-yield: 'off'
+      no-empty: 'off'
+      no-unused-vars: 'off'
+      # getter-return: 'off'
+      # no-useless-catch: 'off'
+      # no-dupe-class-members: 'off'
+      # no-setter-return: 'off'
+      # no-async-promise-executor: 'off'
+
+      # Useful optional rules not in eslint:recommended
+      accessor-pairs: error
+      block-scoped-var: error
+      no-template-curly-in-string: error
+      no-await-in-loop: error
+      no-label-var: error
+      symbol-description: error
+      prefer-spread: error
+      no-use-before-define:
+        - error
+        - nofunc
+
+      semi: error
+      strict:
+        - error
+        - never
+      dot-notation: error
+      linebreak-style: error
+      no-caller: error
+      no-continue: error
+      no-constructor-return: error
+      no-loop-func: error
+      no-self-compare: error
+      no-unmodified-loop-condition: error
+      '@typescript-eslint/no-namespace': 'off'
+      '@typescript-eslint/no-unused-vars': ["warn", { "argsIgnorePattern": "^_" }]
+      '@typescript-eslint/no-empty-function': 'warn'

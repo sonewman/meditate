@@ -1,0 +1,63 @@
+{
+  "files.associations": {
+    "*.json": "jsonc",
+    "*.t": "jsonc"
+  },
+
+  // When enabled, will trim trailing whitespace when saving a file.
+  "files.trimTrailingWhitespace": true,
+
+  "search.exclude": {
+    "**/.yarn": true,
+    "**/.pnp.*": true,
+    "**/node_modules/*": true
+  },
+
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "typescript.tsserver.experimental.enableProjectDiagnostics": true,
+
+  "[typescript]": {
+    "editor.defaultFormatter": "vscode.typescript-language-features"
+  },
+
+
+  // "eslint.lintTask.options": "--cache --ignore-pattern 'node_modules' .",
+  "eslint.lintTask.enable": true,
+  "eslint.run": "onSave",
+  "eslint.validate": [
+    "html",
+    "javascript",
+    "javascriptreact",
+    "typescript",
+    "typescriptreact"
+  ],
+
+  "flow.enabled": false,
+
+
+
+  // typescript auto-format settings
+  "typescript.tsdk": "node_modules/typescript/lib",
+  // "javascript.preferences.importModuleSpecifier": "auto",
+  // "typescript.preferences.importModuleSpecifier": "auto",
+  "javascript.preferences.quoteStyle": "single",
+  "typescript.preferences.quoteStyle": "single",
+  // "editor.defaultFormatter": "esbenp.prettier-vscode",
+
+  // make the .shot files from jest-specific-snapshot act like normal snapshots
+  // "files.associations": {
+  //   "*.shot": "jest-snapshot"
+  // },
+  // "vsicons.associations.files": [
+  //   {
+  //       "icon": "jest_snapshot",
+  //       "extensions": [
+  //           ".ts.shot",
+  //           ".tsx.shot",
+  //           ".js.shot",
+  //           ".jsx.shot",
+  //       ],
+  //       "extends": "jest_snapshot"
+  //   },
+  // ],
+}
